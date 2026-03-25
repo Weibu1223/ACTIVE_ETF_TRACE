@@ -43,18 +43,18 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          # 暫存變更
-          git add .
+          # 1. 強制加入 run.log (防止被 .gitignore 擋掉)
+          # 2. 加入 data 資料夾
+          git add -f run.log
+          git add data/
           
-          # 檢查是否有變動
+          # 檢查是否有變動，有的話才 commit
           if git diff --quiet && git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore(data): update ETF data $(date +'%Y-%m-%d')"
+            git commit -m "chore(data): update ETF data and logs $(date +'%Y-%m-%d %H:%M')"
             
-            # 關鍵步驟：先拉取遠端變更並使用 rebase 避免 merge commit
-            # 這樣可以解決「tip of your current branch is behind」的問題
+            # 確保遠端沒有新 commit 導致 push 失敗
             git pull --rebase origin main
-            
             git push origin main
           fi
