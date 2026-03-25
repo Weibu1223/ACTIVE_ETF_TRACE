@@ -38,23 +38,15 @@ jobs:
         run: |
           python etf_monitor.py
 
-      - name: Create Pull Request for data updates
-        id: create_pr
-        uses: peter-evans/create-pull-request@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore(data): update ETF data (${{ github.run_id }})"
-          title: "chore(data): update ETF data"
-          body: "Automated data update by GitHub Actions"
-          branch: "data-update-${{ github.run_id }}"
-          base: main
-          paths: |
-            data/**
-
-      - name: Merge the PR (if created)
-        if: steps.create_pr.outputs.pull-request-number != ''
-        uses: peter-evans/merge-pull-request@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request-number: ${{ steps.create_pr.outputs.pull-request-number }}
-          merge-method: squash
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/
+          # 檢查是否有檔案變動，避免沒有新資料時 commit 報錯
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore(data): update ETF data $(date +'%Y-%m-%d')"
+            git push
+          fi
