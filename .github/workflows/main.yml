@@ -45,7 +45,7 @@ jobs:
           
           # 1. 強制加入 run.log (防止被 .gitignore 擋掉)
           # 2. 加入 data 資料夾
-          git add -f run.log
+          git add -f data/run.log
           git add data/
           
           # 檢查是否有變動，有的話才 commit
