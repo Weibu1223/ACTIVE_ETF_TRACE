@@ -6,6 +6,9 @@ on:
     - cron: '0 1 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   update-data:
     runs-on: ubuntu-latest
@@ -35,18 +38,23 @@ jobs:
         run: |
           python etf_monitor.py
 
-      - name: Commit and push data/ changes
-        env:
-          GIT_AUTHOR_NAME: "github-actions[bot]"
-          GIT_AUTHOR_EMAIL: "github-actions[bot]@users.noreply.github.com"
-        run: |
-          git config user.name "$GIT_AUTHOR_NAME"
-          git config user.email "$GIT_AUTHOR_EMAIL"
-          git add data || true
-          # 只有在有變更時才 commit & push
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(data): update ETF data ($(date -u +'%Y-%m-%d %H:%M UTC'))"
-            git push
-          else
-            echo "No changes in data/ to commit."
-          fi
+      - name: Create Pull Request for data updates
+        id: create_pr
+        uses: peter-evans/create-pull-request@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(data): update ETF data (${{ github.run_id }})"
+          title: "chore(data): update ETF data"
+          body: "Automated data update by GitHub Actions"
+          branch: "data-update-${{ github.run_id }}"
+          base: main
+          paths: |
+            data/**
+
+      - name: Merge the PR (if created)
+        if: steps.create_pr.outputs.pull-request-number != ''
+        uses: peter-evans/merge-pull-request@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.create_pr.outputs.pull-request-number }}
+          merge-method: squash
