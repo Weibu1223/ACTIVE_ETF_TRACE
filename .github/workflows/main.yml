@@ -1,0 +1,52 @@
+name: Daily ETF data update
+
+on:
+  schedule:
+    # 每天台灣時間 09:00 -> 01:00 UTC
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright browsers (with deps)
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Run etf monitor
+        env:
+          TZ: Asia/Taipei
+        run: |
+          python etf_monitor.py
+
+      - name: Commit and push data/ changes
+        env:
+          GIT_AUTHOR_NAME: "github-actions[bot]"
+          GIT_AUTHOR_EMAIL: "github-actions[bot]@users.noreply.github.com"
+        run: |
+          git config user.name "$GIT_AUTHOR_NAME"
+          git config user.email "$GIT_AUTHOR_EMAIL"
+          git add data || true
+          # 只有在有變更時才 commit & push
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(data): update ETF data ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git push
+          else
+            echo "No changes in data/ to commit."
+          fi
