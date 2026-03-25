@@ -42,11 +42,19 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          
+          # 暫存變更
           git add data/
-          # 檢查是否有檔案變動，避免沒有新資料時 commit 報錯
+          
+          # 檢查是否有變動
           if git diff --quiet && git diff --staged --quiet; then
             echo "No changes to commit"
           else
             git commit -m "chore(data): update ETF data $(date +'%Y-%m-%d')"
-            git push
+            
+            # 關鍵步驟：先拉取遠端變更並使用 rebase 避免 merge commit
+            # 這樣可以解決「tip of your current branch is behind」的問題
+            git pull --rebase origin main
+            
+            git push origin main
           fi
