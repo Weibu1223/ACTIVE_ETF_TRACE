@@ -301,6 +301,362 @@ def format_diff_report(diff, fund_name, old_date, new_date):
     return "\n".join(lines)
 
 
+def _load_json(path: Path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _parse_weight_value(weight_text):
+    """把像 '5.34%' 的字串轉成 float(5.34)。"""
+    if weight_text is None:
+        return None
+    s = str(weight_text).strip().replace("%", "").replace(",", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def analyze_daily_weight_changes_last_5(config, threshold=1.0):
+    """
+    近五個交易日（近 5 筆資料）的「每日（日對日）」權重變動分析。
+    規則：近 5 筆資料會形成 4 個區間（D1→D2、D2→D3、D3→D4、D4→D5），任一區間 abs(Δ) >= threshold 就列出。
+    """
+    files = sorted(DATA_DIR.glob(f"{config['key']}_*.json"), reverse=True)
+    recent_files = list(reversed(files[:5]))  # 日期由舊到新
+    if len(recent_files) < 2:
+        return None
+
+    # 預先載入每一天資料
+    daily = []
+    for f in recent_files:
+        date = f.stem.split("_")[-1]
+        data = _load_json(f)
+        daily.append((date, {item["code"]: item for item in data}))
+
+    # 收集：任一日對日區間達門檻就列出（同一檔股票可能出現多筆）
+    events = []
+    for i in range(len(daily) - 1):
+        from_date, from_map = daily[i]
+        to_date, to_map = daily[i + 1]
+
+        for code in set(from_map.keys()) & set(to_map.keys()):
+            old_item = from_map[code]
+            new_item = to_map[code]
+            old_weight = _parse_weight_value(old_item.get("weight", ""))
+            new_weight = _parse_weight_value(new_item.get("weight", ""))
+            if old_weight is None or new_weight is None:
+                continue
+
+            delta = new_weight - old_weight
+            if abs(delta) < threshold:
+                continue
+
+            events.append({
+                "code": code,
+                "name": new_item.get("name", old_item.get("name", "")),
+                "from_date": from_date,
+                "to_date": to_date,
+                "old_weight": old_weight,
+                "new_weight": new_weight,
+                "delta": delta,
+                "old_rank": old_item.get("rank", ""),
+                "new_rank": new_item.get("rank", ""),
+            })
+
+    events.sort(key=lambda x: (abs(x["delta"]), x["to_date"], x["code"]), reverse=True)
+    return {
+        "start_date": daily[0][0],
+        "end_date": daily[-1][0],
+        "days_count": len(daily),
+        "items": events,
+    }
+
+
+def analyze_weight_change_vs_today_last_5(config, threshold=3.0):
+    """
+    近五個交易日（含今日）中，計算「今日權重 - 該日權重」的變化。
+    僅列出 abs(delta) >= threshold 的標的（用於像：3/23 11%(+6%) 或 3/23 11%(-6%) 這種輸出）。
+    """
+    files = sorted(DATA_DIR.glob(f"{config['key']}_*.json"), reverse=True)
+    recent_files = list(reversed(files[:5]))  # 日期由舊到新
+    if len(recent_files) < 2:
+        return None
+
+    daily = []
+    for f in recent_files:
+        date = f.stem.split("_")[-1]
+        data = _load_json(f)
+        daily.append((date, {item["code"]: item for item in data}))
+
+    today_date, today_map = daily[-1]
+
+    # 先把今日可用的權重轉好，避免重複 parse
+    today_weight_by_code = {}
+    for code, item in today_map.items():
+        w = _parse_weight_value(item.get("weight", ""))
+        if w is not None:
+            today_weight_by_code[code] = w
+
+    results_by_code = {}
+    for past_date, past_map in daily[:-1]:
+        for code in set(past_map.keys()) & set(today_weight_by_code.keys()):
+            past_item = past_map[code]
+            past_weight = _parse_weight_value(past_item.get("weight", ""))
+            if past_weight is None:
+                continue
+            delta = today_weight_by_code[code] - past_weight
+            if abs(delta) < threshold:
+                continue
+
+            results_by_code.setdefault(code, []).append({
+                "date": past_date,
+                "past_weight": past_weight,
+                "delta": delta,
+                "past_rank": past_item.get("rank", ""),
+            })
+
+    # 組裝成便於 README 輸出的結構（每檔股票：依 delta 由大到小）
+    items = []
+    for code, entries in results_by_code.items():
+        name = today_map.get(code, {}).get("name", "")
+        today_rank = today_map.get(code, {}).get("rank", "")
+        today_weight = today_weight_by_code.get(code)
+        entries.sort(key=lambda x: (x["delta"], x["date"]), reverse=True)
+        items.append({
+            "code": code,
+            "name": name,
+            "today_date": today_date,
+            "today_weight": today_weight,
+            "today_rank": today_rank,
+            "entries": entries,
+        })
+
+    items.sort(key=lambda x: max(e["delta"] for e in x["entries"]) if x["entries"] else 0, reverse=True)
+    return {
+        "start_date": daily[0][0],
+        "end_date": today_date,
+        "days_count": len(daily),
+        "today_date": today_date,
+        "items": items,
+    }
+
+
+def render_holdings_markdown(holdings):
+    """把持股資料轉成 README 可直接渲染的 markdown 表格。"""
+    if not holdings:
+        return "_無資料_"
+
+    has_amount = any("amount" in h for h in holdings)
+    holdings = sorted(holdings, key=lambda x: x.get("rank", 0))
+
+    if has_amount:
+        header = "| 排名 | 代號 | 名稱 | 股數 | 金額 | 權重 |\n|---:|---:|:---|---:|---:|:---|"
+        rows = [
+            f"| {h['rank']} | {h['code']} | {h['name']} | {h.get('shares','')} | {h.get('amount','')} | {h.get('weight','')} |"
+            for h in holdings
+        ]
+    else:
+        header = "| 排名 | 代號 | 名稱 | 股數 | 權重 |\n|---:|---:|:---|---:|:---|"
+        rows = [
+            f"| {h['rank']} | {h['code']} | {h['name']} | {h.get('shares','')} | {h.get('weight','')} |"
+            for h in holdings
+        ]
+
+    return header + "\n" + "\n".join(rows)
+
+
+def render_diff_markdown(diff, old_date, new_date):
+    """把差異結果轉成 README 可直接渲染的 markdown。"""
+    if old_date is None:
+        return f"_首次執行，無前期資料可比較（{new_date}）_"
+    if old_date == new_date:
+        return f"_已是同日資料（{new_date}），差異比較略過_"
+    if not diff:
+        return f"_無法比對（前期資料不足）_"
+
+    has_change = diff["added"] or diff["removed"] or diff["changed"]
+    if not has_change:
+        return f"_與 {old_date} 相比，前10大持股無變動_"
+
+    lines = [f"⚠ 與 {old_date} 相比（資料日期：{new_date}），發現以下變動："]
+
+    if diff["added"]:
+        lines.append("\n**新進入前10大**")
+        lines.append("| 代號 | 名稱 | 新排名 | 權重 |")
+        lines.append("|---:|:---|---:|:---|")
+        for h in diff["added"]:
+            lines.append(f"| {h['code']} | {h['name']} | {h['rank']} | {h.get('weight','')} |")
+
+    if diff["removed"]:
+        lines.append("\n**退出前10大**")
+        lines.append("| 代號 | 名稱 | 舊排名 | 原權重 |")
+        lines.append("|---:|:---|---:|:---|")
+        for h in diff["removed"]:
+            lines.append(f"| {h['code']} | {h['name']} | {h['rank']} | {h.get('weight','')} |")
+
+    if diff["changed"]:
+        lines.append("\n**排名/權重變動**")
+        lines.append("| 代號 | 名稱 | 舊排名 | 新排名 | 變動 | 舊權重 | 新權重 |")
+        lines.append("|---:|:---|---:|---:|:---|:---|:---|")
+        for c in diff["changed"]:
+            rank_diff = c["rank_diff"]
+            rank_arrow = "↑" if rank_diff < 0 else "↓"
+            rank_str = f"{rank_arrow}{abs(rank_diff)}" if rank_diff != 0 else "→"
+            lines.append(
+                f"| {c['code']} | {c['name']} | {c['old_rank']} | {c['new_rank']} | {rank_str} | {c.get('old_weight','')} | {c.get('new_weight','')} |"
+            )
+
+    return "\n".join(lines)
+
+
+def write_readme(fund_data, data_date, updated_at):
+    """輸出 README.md 給 GitHub repo 首頁直接展示。"""
+    root_dir = Path(__file__).parent
+    readme_path = root_dir / "README.md"
+
+    lines = []
+    lines.append("# ETF 持股監控（每日更新）")
+    lines.append("")
+    lines.append(f"- 資料日期：`{data_date}`")
+    lines.append(f"- 最後更新：`{updated_at}`")
+    lines.append("")
+    lines.append("每天會抓取兩檔 ETF 前10大持股，並與前一次資料做差異比對。")
+    lines.append("")
+
+    for fund_name, config in SOURCES.items():
+        if fund_name not in fund_data:
+            continue
+
+        holdings = fund_data[fund_name]["holdings"]
+        diff = fund_data[fund_name]["diff"]
+        old_date = fund_data[fund_name]["old_date"]
+
+        lines.append(f"## {fund_name}")
+        lines.append("")
+        lines.append(f"- 資料來源：{config['url']}")
+        lines.append("")
+        lines.append("### 前10大持股")
+        lines.append("")
+        lines.append(render_holdings_markdown(holdings))
+        lines.append("")
+        lines.append("### 差異（相較上一筆）")
+        lines.append("")
+        lines.append(render_diff_markdown(diff, old_date, data_date))
+        lines.append("")
+
+    lines.append("## 近五個交易日每日權重變動（±1%以上）")
+    lines.append("")
+    lines.append("以下以近 5 筆資料形成的 4 個「日對日」區間計算：任一區間權重變動達到 ±1% 即列出。")
+    lines.append("")
+
+    for fund_name, config in SOURCES.items():
+        analysis = analyze_daily_weight_changes_last_5(config, threshold=1.0)
+        lines.append(f"### {fund_name}")
+        lines.append("")
+        if not analysis:
+            lines.append("_資料不足（至少需要 2 天資料）_")
+            lines.append("")
+            continue
+
+        lines.append(
+            f"- 分析區間：`{analysis['start_date']}` → `{analysis['end_date']}`（共 `{analysis['days_count']}` 筆）"
+        )
+        lines.append("")
+
+        if not analysis["items"]:
+            lines.append("_無單日權重變動達到 ±1% 的標的_")
+            lines.append("")
+            continue
+
+        lines.append("| 代號 | 名稱 | 區間 | 起始權重 | 最新權重 | 變動 | 起始排名 | 最新排名 |")
+        lines.append("|---:|:---|:---|---:|---:|:---|---:|---:|")
+        for item in analysis["items"]:
+            sign = "+" if item["delta"] > 0 else ""
+            lines.append(
+                f"| {item['code']} | {item['name']} | {item['from_date']}→{item['to_date']} | {item['old_weight']:.2f}% | {item['new_weight']:.2f}% | {sign}{item['delta']:.2f}% | {item['old_rank']} | {item['new_rank']} |"
+            )
+        lines.append("")
+
+    lines.append("## 近五日持有權重變化（以今日為基準）")
+    lines.append("")
+    lines.append("以下以「今日權重 - 該日權重」計算，僅列出變化達到 `±3%` 以上的日期。")
+    lines.append("")
+
+    for fund_name, config in SOURCES.items():
+        analysis = analyze_weight_change_vs_today_last_5(config, threshold=3.0)
+        lines.append(f"### {fund_name}")
+        lines.append("")
+        if not analysis:
+            lines.append("_資料不足（至少需要 2 天資料）_")
+            lines.append("")
+            continue
+
+        lines.append(
+            f"- 分析區間：`{analysis['start_date']}` → `{analysis['end_date']}`（共 `{analysis['days_count']}` 筆）"
+        )
+        lines.append("")
+
+        if not analysis["items"]:
+            lines.append("_無符合條件的標的_")
+            lines.append("")
+            continue
+
+        for item in analysis["items"]:
+            lines.append(f"#### {item['code']} {item['name']}")
+            lines.append("")
+            if item.get("today_weight") is not None:
+                lines.append(f"- 今日（`{item['today_date']}`）：{item['today_weight']:.2f}%（排名：{item.get('today_rank','')}）")
+            lines.append("")
+            for e in item["entries"]:
+                sign = "+" if e["delta"] > 0 else ""
+                lines.append(f"- `{e['date']}` {e['past_weight']:.2f}%（{sign}{e['delta']:.2f}%）")
+            lines.append("")
+
+    readme_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def generate_readme_from_latest():
+    """不跑爬蟲、直接用已存在的 JSON 更新 README（用於快速檢查/補檔）。"""
+    latest_fund_data = {}
+
+    for fund_name, config in SOURCES.items():
+        files = sorted(DATA_DIR.glob(f"{config['key']}_*.json"), reverse=True)
+        if not files:
+            continue
+
+        latest_file = files[0]
+        latest_holdings = _load_json(latest_file)
+        latest_date = latest_file.stem.split("_")[-1]
+
+        prev_holdings = None
+        prev_date = None
+        if len(files) > 1:
+            prev_file = files[1]
+            prev_holdings = _load_json(prev_file)
+            prev_date = prev_file.stem.split("_")[-1]
+
+        diff = compare_holdings(prev_holdings, latest_holdings) if prev_holdings and prev_date else None
+
+        latest_fund_data[fund_name] = {
+            "holdings": latest_holdings,
+            "diff": diff,
+            "old_date": prev_date,
+        }
+
+    # README 以「最新的檔案日期」呈現
+    all_dates = []
+    for fund_name, config in SOURCES.items():
+        files = sorted(DATA_DIR.glob(f"{config['key']}_*.json"), reverse=True)
+        if files:
+            all_dates.append(files[0].stem.split("_")[-1])
+    data_date = max(all_dates) if all_dates else datetime.now().strftime("%Y-%m-%d")
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    write_readme(latest_fund_data, data_date, updated_at)
+
+
 async def main():
     try:
         from playwright.async_api import async_playwright
@@ -315,7 +671,7 @@ async def main():
     print(f"  ETF 持股監控  |  {datetime.now().strftime('%Y/%m/%d %H:%M')}")
     print("=" * 70)
 
-    all_results = {}
+    readme_fund_data = {}
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -358,14 +714,22 @@ async def main():
                     print(f"\n  ✓ 今日資料已存在: {today_file.name}")
 
                 # 比較差異
+                # 為了確保 README 與 repo 版本一致，改用實際儲存到檔案的資料
+                saved_holdings = _load_json(today_file)
+
+                diff = None
                 if old_data and old_date and old_date != today:
-                    diff = compare_holdings(old_data, holdings)
+                    diff = compare_holdings(old_data, saved_holdings)
                     print(f"\n  ── 差異比較 ──")
                     print(format_diff_report(diff, fund_name, old_date, today))
                 elif not old_data:
                     print(f"\n  (首次執行，無前期資料可比較)")
 
-                all_results[fund_name] = holdings
+                readme_fund_data[fund_name] = {
+                    "holdings": saved_holdings,
+                    "diff": diff,
+                    "old_date": old_date,
+                }
 
             except Exception as e:
                 print(f"  ✗ 錯誤: {e}")
@@ -374,10 +738,21 @@ async def main():
 
         await browser.close()
 
+    # 更新 README，讓 GitHub repo 首頁可以直接顯示最新結果
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        write_readme(readme_fund_data, today, updated_at)
+        print(f"  ✓ README.md 已更新（{today}）")
+    except Exception as e:
+        print(f"  ✗ 更新 README.md 失敗: {e}")
+
     print("\n" + "=" * 70)
     print(f"  完成  |  資料儲存於: {DATA_DIR}")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if len(sys.argv) > 1 and sys.argv[1] == "--generate-readme-only":
+        generate_readme_from_latest()
+    else:
+        asyncio.run(main())
