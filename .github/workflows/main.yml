@@ -2,8 +2,8 @@ name: Daily ETF data update
 
 on:
   schedule:
-    # 每天台灣時間 09:00 -> 01:00 UTC
-    - cron: '0 1 * * *'
+    # 每天台灣時間 08:12 -> 00:00 UTC
+    - cron: '12 0 * * *'
   workflow_dispatch:
 
 permissions:
